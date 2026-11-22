@@ -1,36 +1,47 @@
-// --- ১. টেলিগ্রাম বট দিয়ে অ্যালার্ট ও জিপিএস লোকেশন পাঠানোর সেটআপ ---
-const TELEGRAM_BOT_TOKEN = "8795724835:AAE-xYFohqnPckaSKdrMygLBiruFJMN3Eow";
-const TELEGRAM_CHAT_ID = "5199115006";
+// --- ১. ইমার্জেন্সি অ্যালার্ট ও জিপিএস লোকেশন পাঠানোর সেটআপ ---
+// টেলিগ্রাম বট টোকেন আর এই ফাইলে রাখা হয় না (পাবলিক পেজে টোকেন সবাই দেখতে পায়)।
+// অ্যালার্ট যায় একটি Cloudflare Worker (smartwc2 রিপোর alert-worker/ ফোল্ডার) এর মাধ্যমে,
+// যেখানে টোকেন ও চ্যাট আইডি secret হিসেবে রাখা আছে। এখান থেকে শুধু অ্যালার্টের ধরন পাঠানো হয়।
+const ALERT_ENDPOINT = "https://smartwc-alerts.saurovkumar07.workers.dev/alert";
 
-function sendTelegramAlert(baseMessage) {
+// মূল অ্যালার্ট সাথে সাথে পাঠানো হয়, আর লোকেশন সমান্তরালে (parallel) খোঁজা হয় ছোট টাইমআউট দিয়ে —
+// পাওয়া গেলে আলাদা ফলো-আপ মেসেজ যায়, না পেলে মূল অ্যালার্ট আটকায় না।
+// type: "disconnect" অথবা "stuck"
+function sendTelegramAlert(type) {
+    sendAlert({ type });
+
     if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(
             (position) => {
-                const lat = position.coords.latitude;
-                const lon = position.coords.longitude;
-                const googleMapsLink = `https://www.google.com/maps?q=${lat},${lon}`;
-                const fullMessage = `${baseMessage}\n📍 Location: ${googleMapsLink}`;
-                
-                sendTelegramMessage(fullMessage);
+                sendAlert({
+                    type: "location",
+                    lat: position.coords.latitude,
+                    lon: position.coords.longitude,
+                });
             },
-            (error) => {
-                console.log("Location access denied.");
-                const fallbackMessage = `${baseMessage}\n📍 Location: Unavailable (Permission Denied)`;
-                sendTelegramMessage(fallbackMessage);
-            }
+            () => {
+                console.log("Location unavailable or timed out — main alert was already sent.");
+            },
+            { enableHighAccuracy: false, timeout: 3000, maximumAge: 15000 }
         );
-    } else {
-        sendTelegramMessage(baseMessage);
     }
 }
 
-function sendTelegramMessage(text) {
-    // ব্রাউজার সিকিউরিটি (CORS) এড়াতে GET রিকোয়েস্ট ব্যবহার করা হলো
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${encodeURIComponent(text)}`;
-    
-    fetch(url)
-    .then(response => console.log("Telegram Alert Sent Successfully!"))
-    .catch(error => console.error("Telegram Failed:", error));
+// নেটওয়ার্ক স্লো/আটকে গেলেও যেন রিকোয়েস্ট চিরকাল ঝুলে না থাকে, তাই টাইমআউট সহ fetch
+function sendAlert(payload, timeoutMs = 5000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    return fetch(ALERT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+        keepalive: true,
+    })
+        .then((res) => console.log(res.ok ? "Alert sent successfully!" : `Alert failed: HTTP ${res.status}`))
+        .catch((error) => console.error("Alert send failed:", error))
+        .finally(() => clearTimeout(timer));
 }
 
 // --- ২. ফেস আইডি (WebAuthn) সিকিউরিটি ---
@@ -85,7 +96,7 @@ connectBtn.addEventListener('click', async () => {
             statusDiv.innerText = "Status: Disconnected!";
             statusDiv.style.color = "#ff4d4d";
             connectBtn.innerText = "Reconnect";
-            sendTelegramAlert("⚠️ Alert: Robot Car has been Disconnected or Powered OFF!");
+            sendTelegramAlert("disconnect");
         });
 
         const server = await device.gatt.connect();
@@ -99,7 +110,7 @@ connectBtn.addEventListener('click', async () => {
         txCharacteristic.addEventListener('characteristicvaluechanged', (e) => {
             const value = new TextDecoder().decode(e.target.value);
             if (value === "STUCK") {
-                sendTelegramAlert("⚠️ Emergency: Robot Car is STUCK! Need Help!");
+                sendTelegramAlert("stuck");
             }
         });
 
